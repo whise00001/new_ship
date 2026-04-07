@@ -38,3 +38,15 @@ venv.bak/
 # Frontend
 **/node_modules/
 **/dist/
+
+
+# Database
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+
+# OS & Editor
+.DS_Store
+.vscode/
+.idea/
