@@ -58,7 +58,37 @@ while True:
     # 發送 GPS_RAW_INT
     master.mav.gps_raw_int_send(
         int(time.time()),
-        3, int(lat), int(lon), int(alt), 10, 10, 0, 0, 10
+        3, int(lat), int(lon), int(alt), 150, 150, 0, 0, 12
     )
+    
+    # 模擬「下一個航點」
+    target_lat = lat + 20000 * math.cos(t * 0.1)
+    target_lon = lon + 20000 * math.sin(t * 0.1)
+    master.mav.position_target_global_int_send(
+        int(time.time()), 0, 0,
+        mavutil.mavlink.MAV_FRAME_GLOBAL_INT,
+        0, # ignored mask
+        int(target_lat), int(target_lon), int(alt), 
+        0, 0, 0, 0, 0, 0, 0, 0
+    )
+    # 模擬當前航點編號
+    master.mav.mission_current_send(1)
+    
+    # 處理任務請求
+    req = master.recv_match(blocking=False)
+    if req:
+        if req.get_type() == 'MISSION_REQUEST_LIST':
+            master.mav.mission_count_send(
+                master.target_system, master.target_component, 3, mavutil.mavlink.MAV_MISSION_TYPE_MISSION
+            )
+        elif req.get_type() in ['MISSION_REQUEST', 'MISSION_REQUEST_INT']:
+            master.mav.mission_item_int_send(
+                master.target_system, master.target_component, req.seq,
+                mavutil.mavlink.MAV_FRAME_GLOBAL_INT,
+                mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,
+                0, 1, 0, 0, 0, 0,
+                int(lat + (req.seq + 1)*10000), int(lon + (req.seq + 1)*10000), int(alt),
+                mavutil.mavlink.MAV_MISSION_TYPE_MISSION
+            )
     
     time.sleep(0.1) # 10Hz 發送頻率

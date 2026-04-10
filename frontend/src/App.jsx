@@ -7,14 +7,18 @@ import DataList from './components/DataList';
 export default function App() {
   const [telemetry, setTelemetry] = useState({
     lat: 25.0330, lon: 121.5654, alt: 0, ground_speed: 0, 
-    heading: 0, pitch: 0, roll: 0, battery_voltage: 0, gps_fix_type: 0
+    heading: 0, pitch: 0, roll: 0, battery_voltage: 0, gps_fix_type: 0,
+    armed: false, mode: 'UNKNOWN', satellites_visible: 0, hdop: 0.0,
+    target_lat: 0, target_lon: 0, wp_num: 0, mission: []
   });
 
   const [isConnected, setIsConnected] = useState(false);
   const timeoutRef = useRef(null);
+  const wsRef = useRef(null);
 
   useEffect(() => {
     const ws = new WebSocket('ws://localhost:8000/ws/telemetry');
+    wsRef.current = ws;
     ws.onmessage = (event) => {
       setTelemetry(JSON.parse(event.data));
       setIsConnected(true);
@@ -51,7 +55,20 @@ export default function App() {
         </div>
         
         <div className="lg:col-span-2 space-y-6">
-          <MapModule lat={telemetry.lat} lon={telemetry.lon} heading={telemetry.heading} />
+          <MapModule 
+            lat={telemetry.lat} 
+            lon={telemetry.lon} 
+            heading={telemetry.heading} 
+            target_lat={telemetry.target_lat} 
+            target_lon={telemetry.target_lon} 
+            wp_num={telemetry.wp_num} 
+            mission={telemetry.mission}
+            onRefreshMission={() => {
+              if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                wsRef.current.send(JSON.stringify({ cmd: 'refresh_mission' }));
+              }
+            }}
+          />
           <DataList />
         </div>
       </div>

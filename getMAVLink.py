@@ -37,7 +37,9 @@ MAV_CONNECTION_STRING = f"udpin:{MAV_HOST}:{MAV_PORT}"
 current_telemetry = {
     "lat": 0, "lon": 0, "alt": 0, "ground_speed": 0, 
     "heading": 0, "pitch": 0, "roll": 0, "battery_voltage": 0, "gps_fix_type": 0,
-    "armed": False, "mode": "UNKNOWN"
+    "armed": False, "mode": "UNKNOWN", "satellites_visible": 0, "hdop": 0.0,
+    "target_lat": 0, "target_lon": 0, "wp_num": 0,
+    "mission": []
 }
 
 connected_clients = set()
@@ -52,14 +54,42 @@ async def connect_db():
         print(f"Simulation Mode: DB skipped ({e})")
         return None
 
+force_mission_refresh = False
+
 async def mavlink_listener():
+    global force_mission_refresh
+    import time
     try:
         master = mavutil.mavlink_connection(MAV_CONNECTION_STRING)
         print(f"Listening for MAVLink on {MAV_CONNECTION_STRING}")
         
+        mission_state = 'IDLE'
+        mission_count = 0
+        mission_items = []
+        last_req_time = 0
+
         while True:
-            # 非阻塞方式接收
-            msg = master.recv_match(type=['GLOBAL_POSITION_INT', 'VFR_HUD', 'ATTITUDE', 'SYS_STATUS', 'GPS_RAW_INT', 'HEARTBEAT'], blocking=False)
+            msg = master.recv_match(
+                type=['GLOBAL_POSITION_INT', 'VFR_HUD', 'ATTITUDE', 'SYS_STATUS', 
+                      'GPS_RAW_INT', 'HEARTBEAT', 'POSITION_TARGET_GLOBAL_INT', 
+                      'MISSION_CURRENT', 'MISSION_COUNT', 'MISSION_ITEM_INT', 'MISSION_ITEM'], 
+                blocking=False
+            )
+            
+            if force_mission_refresh:
+                mission_state = 'IDLE'
+                mission_items = []
+                force_mission_refresh = False
+                
+            # Mission retry mechanism (resend request if timeout after 2 seconds)
+            now = time.time()
+            if mission_state in ['REQ_LIST', 'FETCHING'] and (now - last_req_time) > 2.0:
+                if mission_state == 'REQ_LIST':
+                    master.waypoint_request_list_send()
+                elif mission_state == 'FETCHING' and len(mission_items) < mission_count:
+                    master.waypoint_request_send(len(mission_items))
+                last_req_time = now
+
             if not msg:
                 await asyncio.sleep(0.01)
                 continue
@@ -77,12 +107,62 @@ async def mavlink_listener():
                 current_telemetry['pitch'] = msg.pitch
                 current_telemetry['roll'] = msg.roll
             elif msg_type == 'SYS_STATUS':
-                current_telemetry['battery_voltage'] = msg.voltage_battery / 1000.0
+                raw_voltage = msg.voltage_battery / 1000.0
+                if current_telemetry['battery_voltage'] == 0:
+                    current_telemetry['battery_voltage'] = raw_voltage
+                else:
+                    # 使用低通濾波器來平滑電壓跳動 (0.05 權重)
+                    current_telemetry['battery_voltage'] = 0.95 * current_telemetry['battery_voltage'] + 0.05 * raw_voltage
             elif msg_type == 'GPS_RAW_INT':
                 current_telemetry['gps_fix_type'] = msg.fix_type
+                current_telemetry['satellites_visible'] = getattr(msg, 'satellites_visible', 0)
+                current_telemetry['hdop'] = getattr(msg, 'eph', 0) / 100.0
             elif msg_type == 'HEARTBEAT':
                 current_telemetry['armed'] = (msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED) != 0
                 current_telemetry['mode'] = mavutil.mode_string_v10(msg)
+                
+                # If connected and mission not downloaded, request it
+                if mission_state == 'IDLE':
+                    master.waypoint_request_list_send()
+                    mission_state = 'REQ_LIST'
+                    last_req_time = time.time()
+                    
+            elif msg_type == 'MISSION_COUNT':
+                mission_count = msg.count
+                mission_items = []
+                if mission_count > 0:
+                    mission_state = 'FETCHING'
+                    master.waypoint_request_send(0)
+                    last_req_time = time.time()
+                else:
+                    mission_state = 'DONE'
+                    current_telemetry['mission'] = []
+                    
+            elif msg_type in ['MISSION_ITEM_INT', 'MISSION_ITEM']:
+                if mission_state == 'FETCHING' and msg.seq == len(mission_items):
+                    lat = msg.x / 1e7 if msg_type == 'MISSION_ITEM_INT' else msg.x
+                    lon = msg.y / 1e7 if msg_type == 'MISSION_ITEM_INT' else msg.y
+                    if msg.command == mavutil.mavlink.MAV_CMD_NAV_WAYPOINT or msg.command == mavutil.mavlink.MAV_CMD_NAV_SPLINE_WAYPOINT:
+                        mission_items.append({"seq": msg.seq, "lat": lat, "lon": lon})
+                    else:
+                        # Append anyway to keep sequence index correct even if it's a DO_ command
+                        mission_items.append({"seq": msg.seq, "lat": lat, "lon": lon})
+
+                    if len(mission_items) < mission_count:
+                        master.waypoint_request_send(len(mission_items))
+                        last_req_time = time.time()
+                    else:
+                        mission_state = 'DONE'
+                        # Filter out waypoints that have lat/lon = 0 (like DO_ commands)
+                        current_telemetry['mission'] = [w for w in mission_items if w["lat"] != 0 and w["lon"] != 0]
+
+            elif msg_type == 'POSITION_TARGET_GLOBAL_INT':
+                # 防止讀取到尚未設置的目標 (0)
+                if msg.lat_int != 0 and msg.lon_int != 0:
+                    current_telemetry['target_lat'] = msg.lat_int / 1e7
+                    current_telemetry['target_lon'] = msg.lon_int / 1e7
+            elif msg_type == 'MISSION_CURRENT':
+                current_telemetry['wp_num'] = msg.seq
 
             # 透過 WS 廣播到所有前端
             if connected_clients:
@@ -126,7 +206,14 @@ async def websocket_endpoint(websocket: WebSocket):
     connected_clients.add(websocket)
     try:
         while True:
-            await websocket.receive_text() # keep-alive
+            data = await websocket.receive_text() # keep-alive
+            try:
+                cmd = json.loads(data)
+                if cmd.get('cmd') == 'refresh_mission':
+                    global force_mission_refresh
+                    force_mission_refresh = True
+            except:
+                pass
     except WebSocketDisconnect:
         connected_clients.remove(websocket)
 
