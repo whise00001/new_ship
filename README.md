@@ -2,6 +2,11 @@
 
 這是一個基於 React (Vite) 與 Python (FastAPI) 所開發的無人載具即時監控儀表板。它能接收來自 Mission Planner 轉送出來的 MAVLink 遙測封包，將姿態 (HUD)、地圖位置 (Leaflet) 等資訊透過 WebSocket 即時呈現於具有科技 Cyberpunk 風格的前端介面上，並將這些記錄存入 MySQL 資料庫中。
 
+## 系統特色與最新功能 (Key Features)
+- **全域任務動態載入**：後端利用 MAVLink 任務通訊協定 (`MISSION_REQUEST_LIST`) 自動從飛控取得完整航線配置，前端地圖會於開機時直接畫出黃色全局軌跡與所有紅色標點數字圈，且不被圖層遮擋。支援在介面透過「更新按鈕」進行 WebSocket 強制重新下載。
+- **儀表狀態監測進階**：前端嵌入 Haversine 公式計算動態剩餘「航點距離 (WP DIST)」，並且精準顯示接收到的 GPS 衛星數量 (SATS)、定位精度 (HDOP) 以及對接無人船本地時間。
+- **防彈跳電池濾波**：對 `SYS_STATUS` 電池封包傳輸雜訊進行特製平滑演算 (Low-pass filter)，穩定儀表板上的跳動電壓讀數。
+
 ## 目錄
 - [專案結構](#專案結構)
 - [環境需求](#環境需求)
@@ -9,6 +14,7 @@
 - [後端設定 (FastAPI)](#後端設定-fastapi)
 - [前端設定 (React + Vite)](#前端設定-react--vite)
 - [如何進行 MAVLink 串接與測試](#如何進行-mavlink-串接與測試)
+- [常見問題與錯誤排除 (Troubleshooting)](#常見問題與錯誤排除-troubleshooting)
 
 ---
 
